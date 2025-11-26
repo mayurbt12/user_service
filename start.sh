@@ -14,6 +14,9 @@ else
     exit 1
 fi
 
+# Set PYTHONPATH to include parent directory for shared_libs access
+export PYTHONPATH="$(cd .. && pwd):$PYTHONPATH"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

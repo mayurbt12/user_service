@@ -2,6 +2,12 @@
 """Create a default system admin user for the system."""
 
 import sys
+from pathlib import Path
+
+# Add parent directory to Python path to find shared_libs
+parent_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(parent_dir))
+
 import crud
 import database
 from shared_libs.auth import validate_password_strength
