@@ -14,7 +14,7 @@ import os
 import crud
 import database
 from config import settings
-from auth import validate_password_strength
+from shared_libs.auth import validate_password_strength
 
 # Create FastMCP server with host and port from settings
 mcp = FastMCP(

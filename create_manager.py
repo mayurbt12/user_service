@@ -4,7 +4,7 @@
 import sys
 import crud
 import database
-from auth import validate_password_strength
+from shared_libs.auth import validate_password_strength
 
 
 def create_manager_user(mobile, password, first_name="Manager", last_name="User"):

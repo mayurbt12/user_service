@@ -4,7 +4,7 @@
 import sys
 import crud
 import database
-from auth import validate_password_strength
+from shared_libs.auth import validate_password_strength
 
 
 def create_service_account(mobile, password, first_name="Service", last_name="Account"):

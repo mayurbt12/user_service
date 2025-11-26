@@ -101,19 +101,20 @@ class User(Base):
     # Profile Data (stored as JSON for flexibility)
     profile = Column(JSON, default={}, doc="User profile data (name, avatar, etc.)")
 
-    # Organization Association
+    # Organization Association (DEPRECATED - Use UserOrganization table)
+    # Kept for backward compatibility during migration
     organization_id = Column(
         Integer,
         ForeignKey('organizations.id', ondelete='RESTRICT'),
         nullable=True,  # Nullable to allow user creation before organization assignment
         index=True,
-        doc="Organization ID this user belongs to"
+        doc="[DEPRECATED] Organization ID - use UserOrganization table instead"
     )
     organization_role = Column(
         SQLEnum(OrganizationRoleEnum),
         default=OrganizationRoleEnum.MEMBER,
         index=True,
-        doc="User's role within the organization"
+        doc="[DEPRECATED] User's role - use UserOrganization table instead"
     )
 
     # Timestamps - CRITICAL: DateTime objects, NOT strings!
@@ -141,12 +142,204 @@ class User(Base):
         Index('idx_org_role', 'organization_id', 'organization_role'),
     )
 
+    def get_active_organizations(self, db_session):
+        """Get all active organizations this user belongs to.
+
+        Args:
+            db_session: SQLAlchemy database session
+
+        Returns:
+            List of tuples (organization_id, organization_role) for active memberships
+        """
+        from sqlalchemy import and_
+
+        memberships = db_session.query(UserOrganization).filter(
+            and_(
+                UserOrganization.user_id == self.id,
+                UserOrganization.is_active == True
+            )
+        ).all()
+
+        return [(m.organization_id, m.role) for m in memberships]
+
+    def get_default_organization_id(self, db_session):
+        """Get the default organization ID for token generation.
+
+        For backward compatibility, returns the first active organization.
+        In the future, this could be user-configurable.
+
+        Args:
+            db_session: SQLAlchemy database session
+
+        Returns:
+            Integer: Default organization ID or None
+        """
+        # Try new UserOrganization table first
+        membership = db_session.query(UserOrganization).filter(
+            UserOrganization.user_id == self.id,
+            UserOrganization.is_active == True
+        ).first()
+
+        if membership:
+            return membership.organization_id
+
+        # Fallback to deprecated field for backward compatibility
+        return self.organization_id
+
+    def get_default_organization_role(self, db_session):
+        """Get the default organization role for token generation.
+
+        Args:
+            db_session: SQLAlchemy database session
+
+        Returns:
+            OrganizationRoleEnum: Default organization role or MEMBER
+        """
+        # Try new UserOrganization table first
+        membership = db_session.query(UserOrganization).filter(
+            UserOrganization.user_id == self.id,
+            UserOrganization.is_active == True
+        ).first()
+
+        if membership:
+            return membership.role
+
+        # Fallback to deprecated field for backward compatibility
+        return self.organization_role or OrganizationRoleEnum.MEMBER
+
+    def is_member_of_organization(self, db_session, organization_id):
+        """Check if user is an active member of the specified organization.
+
+        Args:
+            db_session: SQLAlchemy database session
+            organization_id: Organization ID to check
+
+        Returns:
+            Boolean: True if user is active member, False otherwise
+        """
+        from sqlalchemy import and_
+
+        membership = db_session.query(UserOrganization).filter(
+            and_(
+                UserOrganization.user_id == self.id,
+                UserOrganization.organization_id == organization_id,
+                UserOrganization.is_active == True
+            )
+        ).first()
+
+        return membership is not None
+
+    def get_organization_role_for(self, db_session, organization_id):
+        """Get user's role in a specific organization.
+
+        Args:
+            db_session: SQLAlchemy database session
+            organization_id: Organization ID
+
+        Returns:
+            OrganizationRoleEnum or None: User's role in the organization
+        """
+        from sqlalchemy import and_
+
+        membership = db_session.query(UserOrganization).filter(
+            and_(
+                UserOrganization.user_id == self.id,
+                UserOrganization.organization_id == organization_id,
+                UserOrganization.is_active == True
+            )
+        ).first()
+
+        return membership.role if membership else None
+
     def __repr__(self):
         """String representation"""
         return (
             f"<User(id={self.id}, mobile={self.mobile}, "
             f"role={self.role.value}, org_id={self.organization_id}, "
-            f"org_role={self.organization_role.value}, active={self.is_active})>"
+            f"org_role={self.organization_role.value if self.organization_role else None}, "
+            f"active={self.is_active})>"
+        )
+
+
+class UserOrganization(Base):
+    """User-Organization junction table - supports multi-organization membership.
+
+    This table enables users to belong to multiple organizations with different roles.
+    Provides scalable foundation for future multi-organization features.
+
+    CRITICAL: All datetime fields are DateTime objects with timezone support.
+    """
+
+    __tablename__ = "user_organizations"
+
+    # Primary Key
+    id = Column(String, primary_key=True, doc="Unique junction record ID (UUID)")
+
+    # Foreign Keys
+    user_id = Column(
+        String,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+        doc="Reference to user"
+    )
+    organization_id = Column(
+        Integer,
+        ForeignKey('organizations.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+        doc="Reference to organization"
+    )
+
+    # Organization Role
+    role = Column(
+        SQLEnum(OrganizationRoleEnum),
+        default=OrganizationRoleEnum.MEMBER,
+        nullable=False,
+        index=True,
+        doc="User's role within this organization"
+    )
+
+    # Status
+    is_active = Column(
+        Boolean,
+        default=True,
+        index=True,
+        doc="Whether this membership is active"
+    )
+
+    # Timestamps - CRITICAL: DateTime objects!
+    joined_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="When user joined this organization (timezone-aware)"
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="When this record was created (timezone-aware)"
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="When this record was last updated (timezone-aware)"
+    )
+
+    # Composite indexes and constraints
+    __table_args__ = (
+        Index('idx_user_org_membership', 'user_id', 'organization_id'),
+        Index('idx_org_user_active_membership', 'organization_id', 'user_id', 'is_active'),
+        Index('idx_user_active_membership', 'user_id', 'is_active'),
+        # Ensure a user can only have one membership record per organization
+        # (though is_active controls if it's currently active)
+    )
+
+    def __repr__(self):
+        """String representation"""
+        return (
+            f"<UserOrganization(id={self.id}, user_id={self.user_id}, "
+            f"org_id={self.organization_id}, role={self.role.value}, "
+            f"active={self.is_active})>"
         )
 
 

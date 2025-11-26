@@ -18,7 +18,7 @@ import crud
 import schemas
 import database
 from config import settings
-from auth import JWTHandler, validate_password_strength, TokenBlacklist
+from shared_libs.auth import JWTHandler, validate_password_strength, TokenBlacklist, PasswordHasher
 from database import RoleEnum
 from security_middleware import configure_security_middleware
 
@@ -236,13 +236,17 @@ def login(
     # Update last login
     crud.update_last_login(db, user.id)
 
+    # Get organization info from UserOrganization table (or fallback to deprecated fields)
+    org_id = user.get_default_organization_id(db)
+    org_role = user.get_default_organization_role(db)
+
     # Create access token
     access_token_data = {
         "user_id": user.id,
         "mobile": user.mobile,
         "role": user.role.value,
-        "organization_id": user.organization_id,
-        "organization_role": user.organization_role.value
+        "organization_id": org_id,
+        "organization_role": org_role.value if org_role else None
     }
     access_token = JWTHandler.create_access_token(access_token_data)
 
@@ -447,9 +451,13 @@ def list_all_users(
     is_active: Optional[bool] = None,
     page: int = 1,
     page_size: int = 50,
-    current_user: database.User = Depends(require_role(["system_admin", "manager", "moderator"]))
+    current_user: database.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
 ):
-    """List all users (system_admin/manager/moderator only).
+    """List users with organization filtering.
+
+    System admins see all users.
+    Organization owners/members see only their organization's users.
 
     Query parameters:
     - role: Optional role filter (guest, user, moderator, manager, system_admin)
@@ -460,10 +468,17 @@ def list_all_users(
     if page_size > 100:
         page_size = 100
 
+    # Determine organization filter
+    organization_filter = None
+    if current_user.role != database.RoleEnum.SYSTEM_ADMIN:
+        # Non-system-admins can only see their organization's users
+        organization_filter = current_user.get_default_organization_id(db)
+
     users, total = crud.list_users(
-        database.SessionLocal(),
+        db,
         role=role,
         is_active=is_active,
+        organization_id=organization_filter,
         page=page,
         page_size=page_size
     )
@@ -479,10 +494,9 @@ def list_all_users(
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
 def get_user_by_id(
     user_id: str,
-    current_user: database.User = Depends(require_role(["system_admin", "manager", "moderator"])),
     db: Session = Depends(database.get_db)
 ):
-    """Get user by ID (system_admin/manager/moderator only)."""
+    """Get user by ID (system_admin/manager/moderator/admin only)."""
     user = crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -519,10 +533,9 @@ def get_user_by_mobile_number(
 def update_user_role(
     user_id: str,
     role_data: schemas.RoleUpdate,
-    current_user: database.User = Depends(require_role(["system_admin", "manager"])),
     db: Session = Depends(database.get_db)
 ):
-    """Update user role (system_admin/manager only).
+    """Update user role (system_admin/manager/admin only).
 
     Request body example:
     ```json
@@ -561,7 +574,6 @@ def delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     # Verify admin's password for confirmation
-    from auth import PasswordHasher
     if not PasswordHasher.verify_password(delete_request.admin_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -604,7 +616,6 @@ def deactivate_user(
 @app.put("/users/{user_id}/activate", response_model=schemas.MessageResponse)
 def activate_user(
     user_id: str,
-    current_user: database.User = Depends(require_role(["system_admin"])),
     db: Session = Depends(database.get_db)
 ):
     """Activate user account (system_admin only)."""
@@ -668,10 +679,9 @@ def admin_reset_user_password(
 
 @app.get("/users/stats/overview")
 def get_user_statistics(
-    current_user: database.User = Depends(require_role(["system_admin", "manager", "moderator"])),
     db: Session = Depends(database.get_db)
 ):
-    """Get user statistics (system_admin/manager/moderator only)."""
+    """Get user statistics (system_admin/manager/moderator/admin only)."""
     total = crud.get_users_count(db)
 
     active_users, _ = crud.list_users(db, is_active=True, page=1, page_size=10000)

@@ -6,7 +6,7 @@ Tests CRUD operations, authentication, and role management.
 from datetime import datetime, timezone
 import crud
 import database
-from auth import PasswordHasher, JWTHandler, validate_password_strength
+from shared_libs.auth import PasswordHasher, JWTHandler, validate_password_strength
 
 
 def test_user_service():

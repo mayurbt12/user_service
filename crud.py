@@ -10,8 +10,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import hashlib
 
-from database import User, RefreshToken, RoleEnum, Organization, OrganizationRoleEnum
-from auth import PasswordHasher
+from database import User, RefreshToken, RoleEnum, Organization, OrganizationRoleEnum, UserOrganization
+from shared_libs.auth import PasswordHasher
+from sqlalchemy import and_
 
 
 def create_user(
@@ -95,8 +96,22 @@ def create_user(
         db.add(db_org)
         db.flush()  # Flush to get the auto-generated org ID
 
-        # Update user with organization_id
+        # Update user with organization_id (backward compatibility)
         db_user.organization_id = db_org.id
+
+        # Create UserOrganization record (new multi-org support)
+        user_org = UserOrganization(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            organization_id=db_org.id,
+            role=org_role_enum,
+            is_active=True,
+            joined_at=now,
+            created_at=now,
+            updated_at=now
+        )
+        db.add(user_org)
+
         db.commit()
         db.refresh(db_user)
         return db_user
@@ -120,6 +135,21 @@ def create_user(
         )
 
         db.add(db_user)
+        db.flush()  # Flush to get user_id
+
+        # Create UserOrganization record (new multi-org support)
+        user_org = UserOrganization(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            organization_id=final_org_id,
+            role=org_role_enum,
+            is_active=True,
+            joined_at=now,
+            created_at=now,
+            updated_at=now
+        )
+        db.add(user_org)
+
         db.commit()
         db.refresh(db_user)
         return db_user
@@ -379,6 +409,8 @@ def list_users(
 ) -> Tuple[List[User], int]:
     """List users with optional filtering and pagination.
 
+    Queries from UserOrganization table when organization_id filter is specified.
+
     Args:
         db: Database session
         role: Optional role filter
@@ -390,18 +422,34 @@ def list_users(
     Returns:
         Tuple[List[User], int]: (list of users, total count)
     """
-    query = db.query(User)
+    if organization_id is not None:
+        # Query from UserOrganization table for accurate membership filtering
+        user_org_query = db.query(UserOrganization).filter(
+            and_(
+                UserOrganization.organization_id == organization_id,
+                UserOrganization.is_active == True
+            )
+        )
 
-    # Apply filters
+        # Get user IDs from organization membership
+        user_ids = [uo.user_id for uo in user_org_query.all()]
+
+        if not user_ids:
+            return [], 0
+
+        # Build user query with organization filter
+        query = db.query(User).filter(User.id.in_(user_ids))
+    else:
+        # No organization filter - query all users
+        query = db.query(User)
+
+    # Apply additional filters
     if role:
         role_enum = RoleEnum[role.upper()]
         query = query.filter(User.role == role_enum)
 
     if is_active is not None:
         query = query.filter(User.is_active == is_active)
-
-    if organization_id is not None:
-        query = query.filter(User.organization_id == organization_id)
 
     # Get total count
     total = query.count()
@@ -667,6 +715,21 @@ def add_team_member_to_organization(
     )
 
     db.add(db_user)
+    db.flush()  # Flush to get user_id
+
+    # Create UserOrganization record (new multi-org support)
+    user_org = UserOrganization(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        organization_id=org_id,
+        role=OrganizationRoleEnum.MEMBER,
+        is_active=True,
+        joined_at=now,
+        created_at=now,
+        updated_at=now
+    )
+    db.add(user_org)
+
     db.commit()
     db.refresh(db_user)
     return db_user
@@ -675,6 +738,8 @@ def add_team_member_to_organization(
 def list_organization_members(db: Session, org_id: int) -> List[User]:
     """List all members of an organization.
 
+    Queries from UserOrganization table for accurate membership data.
+
     Args:
         db: Database session
         org_id: Organization ID
@@ -682,11 +747,33 @@ def list_organization_members(db: Session, org_id: int) -> List[User]:
     Returns:
         List[User]: List of users in the organization
     """
-    return db.query(User).filter(User.organization_id == org_id).order_by(User.created_at.desc()).all()
+    # Query UserOrganization table to get active members
+    user_org_records = db.query(UserOrganization).filter(
+        and_(
+            UserOrganization.organization_id == org_id,
+            UserOrganization.is_active == True
+        )
+    ).order_by(UserOrganization.joined_at.desc()).all()
+
+    # Get user IDs
+    user_ids = [uo.user_id for uo in user_org_records]
+
+    # Fetch user objects
+    if not user_ids:
+        return []
+
+    users = db.query(User).filter(User.id.in_(user_ids)).all()
+
+    # Sort users to match the order of user_org_records
+    user_dict = {user.id: user for user in users}
+    return [user_dict[uid] for uid in user_ids if uid in user_dict]
 
 
 def remove_team_member_from_organization(db: Session, org_id: int, user_id: str) -> Tuple[bool, str]:
-    """Remove a team member from an organization (deactivate the user).
+    """Remove a team member from an organization (deactivate membership).
+
+    Deactivates the UserOrganization record instead of the user account,
+    allowing for future multi-organization support.
 
     Args:
         db: Database session
@@ -700,14 +787,28 @@ def remove_team_member_from_organization(db: Session, org_id: int, user_id: str)
     if not user:
         return False, "User not found"
 
-    if user.organization_id != org_id:
+    # Check UserOrganization record
+    user_org = db.query(UserOrganization).filter(
+        and_(
+            UserOrganization.user_id == user_id,
+            UserOrganization.organization_id == org_id,
+            UserOrganization.is_active == True
+        )
+    ).first()
+
+    if not user_org:
         return False, "User does not belong to this organization"
 
-    if user.organization_role == OrganizationRoleEnum.OWNER:
+    if user_org.role == OrganizationRoleEnum.OWNER:
         return False, "Cannot remove organization owner"
 
-    # Deactivate the user
+    # Deactivate the organization membership
+    user_org.is_active = False
+    user_org.updated_at = datetime.now(timezone.utc)
+
+    # Also deactivate the user (backward compatibility with single-org model)
     user.is_active = False
     user.updated_at = datetime.now(timezone.utc)
+
     db.commit()
     return True, ""
