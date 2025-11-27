@@ -48,8 +48,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Force HTTPS (max-age=1 year)
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         
-        # Content Security Policy
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        # Content Security Policy - Allow Swagger UI CDN resources
+        if request.url.path in ["/docs", "/redoc"]:
+            # Relaxed CSP for API documentation pages
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.jsdelivr.net"
+            )
+        else:
+            # Strict CSP for all other endpoints
+            response.headers["Content-Security-Policy"] = "default-src 'self'"
         
         # Referrer policy
         response.headers["Referrer-Policy"] = "no-referrer"
