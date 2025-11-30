@@ -2,26 +2,26 @@
 # These packages are required for the user service to function
 
 # Database
-sqlalchemy>=2.0.0
+sqlalchemy==2.0.0
 
 # API Framework
-fastapi>=0.110.0
-uvicorn>=0.23.0
+fastapi==0.121.3
+uvicorn==0.38.0
 
 # Data Validation
-pydantic>=2.4.0
-pydantic-settings>=2.0.0
+pydantic==2.12.4
+pydantic-settings==2.12.0
 
 # Authentication & Security
-bcrypt>=4.0.0
-python-jose[cryptography]>=3.3.0
-passlib>=1.7.4
+bcrypt==4.0.0
+python-jose[cryptography]==3.3.0
+passlib==1.7.4
 
 # MCP (Model Context Protocol)
-mcp>=1.0.0
+mcp==1.22.0
 
 # Python Standard Library Extensions
-python-multipart>=0.0.6
-slowapi>=0.1.9  # Allow newer versions for better compatibility
-redis>=5.0.1  # Allow newer versions for better compatibility
-psycopg2-binary>=2.9.11  # Updated for Python 3.10-3.13 compatibility
+python-multipart==0.0.20
+slowapi==0.1.9  # Allow newer versions for better compatibility
+redis==5.0.1  # Allow newer versions for better compatibility
+psycopg2-binary==2.9.11  # Updated for Python 3.10-3.13 compatibility

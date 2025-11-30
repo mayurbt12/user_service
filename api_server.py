@@ -167,7 +167,7 @@ def health_check():
 # Authentication Endpoints
 
 @app.post("/auth/register", response_model=schemas.UserResponse, status_code=201)
-@limiter.limit("3/hour")  # Max 3 registrations per hour per IP
+@limiter.limit("30/hour")  # Max 30 registrations per hour per IP
 def register_user(
     request: Request,
     user_data: schemas.UserCreate,
@@ -368,6 +368,35 @@ def logout(
     }
 
 
+@app.post("/auth/verify-password", response_model=schemas.MessageResponse)
+def verify_password(
+    password_data: schemas.PasswordVerification,
+    current_user: database.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Verify current user's password.
+
+    Used by frontend before performing sensitive operations.
+
+    Request body example:
+    ```json
+    {
+        "password": "YourPassword@123"
+    }
+    ```
+    """
+    if not PasswordHasher.verify_password(password_data.password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid password"
+        )
+
+    return {
+        "message": "Password verified successfully",
+        "success": True
+    }
+
+
 # User Profile Endpoints
 
 @app.get("/users/me", response_model=schemas.UserResponse)
@@ -556,29 +585,32 @@ def update_user_role(
 @app.delete("/users/{user_id}", response_model=schemas.MessageResponse)
 def delete_user(
     user_id: str,
-    delete_request: schemas.UserDeleteRequest,
+    delete_request: schemas.UserDeleteRequest = None,
     current_user: database.User = Depends(require_role(["system_admin"])),
     db: Session = Depends(database.get_db)
 ):
-    """Delete user (system_admin only) - requires password confirmation.
+    """Delete user (system_admin only) - password optional for service calls.
 
-    Request body example:
+    Request body example (for direct calls):
     ```json
     {
         "admin_password": "YourAdminPassword@123"
     }
     ```
+
+    For service-to-service calls, password can be omitted if already verified.
     """
     # Prevent system_admin from deleting themselves
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    # Verify admin's password for confirmation
-    if not PasswordHasher.verify_password(delete_request.admin_password, current_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid password. Please enter your password to confirm deletion."
-        )
+    # Verify admin's password if provided
+    if delete_request and delete_request.admin_password:
+        if not PasswordHasher.verify_password(delete_request.admin_password, current_user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password. Please enter your password to confirm deletion."
+            )
 
     success, error = crud.delete_user(db, user_id)
     if not success:

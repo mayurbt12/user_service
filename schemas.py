@@ -113,12 +113,21 @@ class RoleUpdate(BaseModel):
     )
 
 
-class UserDeleteRequest(BaseModel):
-    """Schema for user deletion with admin password confirmation."""
+class PasswordVerification(BaseModel):
+    """Schema for password verification."""
 
-    admin_password: str = Field(
+    password: str = Field(
         ...,
-        description="Admin's password for confirming deletion"
+        description="Password to verify"
+    )
+
+
+class UserDeleteRequest(BaseModel):
+    """Schema for user deletion with optional admin password confirmation."""
+
+    admin_password: Optional[str] = Field(
+        None,
+        description="Admin's password for confirming deletion (optional for service-to-service calls)"
     )
 
 
