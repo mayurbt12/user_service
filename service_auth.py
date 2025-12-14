@@ -8,9 +8,10 @@ import requests
 from typing import Optional, Dict
 from datetime import datetime, timedelta, timezone
 import os
-import logging
 
-logger = logging.getLogger(__name__)
+from logger_config import setup_logger
+
+logger = setup_logger(__name__, 'service.log')
 
 
 class ServiceAuthManager:
@@ -198,8 +199,6 @@ def create_service_account_if_not_exists():
 
 if __name__ == "__main__":
     # Test the service auth manager
-    logging.basicConfig(level=logging.INFO)
-
     manager = ServiceAuthManager(
         user_service_url="http://localhost:8007",
         service_mobile=os.getenv("SERVICE_ACCOUNT_MOBILE", "+919999999999"),

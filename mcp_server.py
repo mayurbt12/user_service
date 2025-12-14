@@ -15,6 +15,9 @@ import crud
 import database
 from config import settings
 from shared_libs.auth import validate_password_strength
+from logger_config import setup_logger
+
+logger = setup_logger(__name__, 'mcp.log')
 
 # Create FastMCP server with host and port from settings
 mcp = FastMCP(
@@ -65,6 +68,7 @@ def register_user(
         if first_name or last_name:
             name = f"\nName: {first_name or ''} {last_name or ''}".strip()
 
+        logger.info(f"MCP: User registered: mobile={mobile}, role={role}")
         return (
             f"✓ User registered successfully!\n"
             f"ID: {user.id}\n"
@@ -73,8 +77,10 @@ def register_user(
             f"Created: {user.created_at.isoformat()}"
         )
     except ValueError as e:
+        logger.warning(f"MCP: Registration failed: mobile={mobile}, error={str(e)}")
         return f"✗ Registration failed: {str(e)}"
     except Exception as e:
+        logger.error(f"MCP: Registration error: mobile={mobile}, error={str(e)}")
         return f"✗ Error registering user: {str(e)}"
     finally:
         db.close()
@@ -95,11 +101,13 @@ def authenticate_user(mobile: str, password: str) -> str:
     try:
         user = crud.authenticate_user(db, mobile, password)
         if not user:
+            logger.warning(f"MCP: Auth failed: mobile={mobile}")
             return "✗ Authentication failed: Invalid credentials or inactive account"
 
         # Update last login
         crud.update_last_login(db, user.id)
 
+        logger.info(f"MCP: Auth successful: user_id={user.id}, mobile={mobile}")
         return (
             f"✓ Authentication successful!\n"
             f"User ID: {user.id}\n"

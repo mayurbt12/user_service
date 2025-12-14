@@ -9,16 +9,12 @@ import subprocess
 import signal
 import sys
 import time
-import logging
 import os
 from typing import List
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from logger_config import setup_logger
+
+logger = setup_logger(__name__, 'service.log')
 
 # Global list to track all running processes
 processes: List[subprocess.Popen] = []

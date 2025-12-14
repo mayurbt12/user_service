@@ -21,6 +21,9 @@ from config import settings
 from shared_libs.auth import JWTHandler, validate_password_strength, TokenBlacklist, PasswordHasher
 from database import RoleEnum
 from security_middleware import configure_security_middleware
+from logger_config import setup_logger
+
+logger = setup_logger(__name__, 'api.log')
 
 # Create rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -188,6 +191,7 @@ def register_user(
         # Validate password strength
         is_valid, error_msg = validate_password_strength(user_data.password)
         if not is_valid:
+            logger.warning(f"Registration failed: weak password for mobile={user_data.mobile}")
             raise HTTPException(status_code=400, detail=error_msg)
 
         # Create user
@@ -200,11 +204,14 @@ def register_user(
             organization_id=user_data.organization_id,
             organization_role=user_data.organization_role
         )
+        logger.info(f"User registered: mobile={user_data.mobile}, role={user_data.role}")
         return user
 
     except ValueError as e:
+        logger.warning(f"Registration failed: mobile={user_data.mobile}, error={str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"Registration error: mobile={user_data.mobile}, error={str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating user: {str(e)}")
 
 
@@ -228,6 +235,7 @@ def login(
     # Authenticate user
     user = crud.authenticate_user(db, credentials.mobile, credentials.password)
     if not user:
+        logger.warning(f"Login failed: mobile={credentials.mobile} (invalid credentials)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -235,6 +243,7 @@ def login(
 
     # Update last login
     crud.update_last_login(db, user.id)
+    logger.info(f"Login successful: user_id={user.id}, mobile={user.mobile}")
 
     # Get organization info from UserOrganization table (or fallback to deprecated fields)
     org_id = user.get_default_organization_id(db)
@@ -362,6 +371,7 @@ def logout(
     # Also blacklist the refresh token
     TokenBlacklist.add_token(token_request.refresh_token, expires_in_seconds=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600)
 
+    logger.info(f"User logged out: user_id={current_user.id}")
     return {
         "message": "Logged out successfully",
         "success": True
@@ -461,11 +471,13 @@ def change_current_user_password(
     )
 
     if not success:
+        logger.warning(f"Password change failed: user_id={current_user.id}")
         raise HTTPException(status_code=400, detail=error)
 
     # Revoke all existing refresh tokens for security
     crud.revoke_all_user_tokens(db, current_user.id)
 
+    logger.info(f"Password changed: user_id={current_user.id}")
     return {
         "message": "Password changed successfully. Please login again.",
         "success": True
@@ -614,8 +626,10 @@ def delete_user(
 
     success, error = crud.delete_user(db, user_id)
     if not success:
+        logger.warning(f"User deletion failed: target_id={user_id}, error={error}")
         raise HTTPException(status_code=400, detail=error)
 
+    logger.info(f"User deleted: target_id={user_id}, by_admin={current_user.id}")
     return {
         "message": f"User {user_id} deleted successfully",
         "success": True
@@ -639,6 +653,7 @@ def deactivate_user(
     # Revoke all user's refresh tokens
     crud.revoke_all_user_tokens(db, user_id)
 
+    logger.info(f"User deactivated: target_id={user_id}, by_admin={current_user.id}")
     return {
         "message": f"User {user_id} deactivated successfully",
         "success": True
@@ -655,6 +670,7 @@ def activate_user(
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
 
+    logger.info(f"User activated: target_id={user_id}")
     return {
         "message": f"User {user_id} activated successfully",
         "success": True
@@ -701,6 +717,7 @@ def admin_reset_user_password(
     # Revoke all user's refresh tokens for security
     crud.revoke_all_user_tokens(db, user_id)
 
+    logger.info(f"Admin password reset: target_id={user_id}, by_admin={current_user.id}")
     return {
         "message": f"Password reset successfully for user {user_id}. User must login with new password.",
         "success": True

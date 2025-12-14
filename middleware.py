@@ -6,7 +6,6 @@ access control. Implements Token + Validation Hybrid pattern.
 CRITICAL: Never use hasattr() per project requirements.
 """
 
-import logging
 from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -15,8 +14,9 @@ from sqlalchemy.orm import Session
 from database import User, RoleEnum, OrganizationRoleEnum, get_db
 from shared_libs.auth import JWTHandler, TokenBlacklist
 from validators import get_organization_validator, OrganizationAccessDeniedError
+from logger_config import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__, 'api.log')
 
 security = HTTPBearer()
 

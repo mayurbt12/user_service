@@ -8,7 +8,6 @@ Implements Token + Validation Hybrid pattern:
 CRITICAL: Never use hasattr() per project requirements.
 """
 
-import logging
 from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -16,8 +15,9 @@ from functools import lru_cache
 from datetime import datetime, timezone, timedelta
 
 from database import User, UserOrganization, Organization, RoleEnum, OrganizationRoleEnum
+from logger_config import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__, 'api.log')
 
 
 class OrganizationAccessDeniedError(Exception):

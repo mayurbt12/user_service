@@ -13,6 +13,9 @@ import hashlib
 from database import User, RefreshToken, RoleEnum, Organization, OrganizationRoleEnum, UserOrganization
 from shared_libs.auth import PasswordHasher
 from sqlalchemy import and_
+from logger_config import setup_logger
+
+logger = setup_logger(__name__, 'crud.log')
 
 
 def create_user(
@@ -114,6 +117,7 @@ def create_user(
 
         db.commit()
         db.refresh(db_user)
+        logger.info(f"User created: id={user_id}, mobile={mobile}, role={role}")
         return db_user
     else:
         # Joining existing organization
@@ -152,6 +156,7 @@ def create_user(
 
         db.commit()
         db.refresh(db_user)
+        logger.info(f"User created: id={user_id}, mobile={mobile}, role={role}, org_id={final_org_id}")
         return db_user
 
 
@@ -393,9 +398,11 @@ def delete_user(db: Session, user_id: str) -> Tuple[bool, str]:
     try:
         db.delete(user)
         db.commit()
+        logger.info(f"User deleted: id={user_id}")
         return True, ""
     except Exception as e:
         db.rollback()
+        logger.error(f"User deletion failed: id={user_id}, error={str(e)}")
         return False, f"Error deleting user: {str(e)}"
 
 
