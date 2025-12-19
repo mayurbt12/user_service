@@ -19,9 +19,11 @@ import schemas
 import database
 from config import settings
 from shared_libs.auth import JWTHandler, validate_password_strength, TokenBlacklist, PasswordHasher
-from database import RoleEnum
+from database import RoleEnum, get_pool_stats, check_database_connection
 from security_middleware import configure_security_middleware
 from logger_config import setup_logger
+from request_middleware import configure_request_middleware
+from diagnostics import get_request_id
 
 logger = setup_logger(__name__, 'api.log')
 
@@ -60,6 +62,9 @@ app.add_middleware(
 
 # Configure security middleware (headers and request size limits)
 configure_security_middleware(app)
+
+# Configure request tracing middleware (timing and correlation IDs)
+configure_request_middleware(app)
 
 # Security scheme
 security = HTTPBearer()
@@ -159,11 +164,47 @@ def root():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint for monitoring"""
+    """Liveness probe - basic health check for monitoring."""
     return {
         "status": "healthy",
         "service": "user_management_service",
         "database": settings.DATABASE_URL.split("://")[0]
+    }
+
+
+@app.get("/health/detailed")
+def detailed_health_check():
+    """Readiness probe - detailed health check with diagnostics.
+
+    Returns comprehensive health information including:
+    - Database connectivity and latency
+    - Connection pool statistics (Saturation signal)
+    - Service configuration thresholds
+    """
+    # Check database connection
+    db_connected, db_latency_ms, db_error = check_database_connection()
+
+    # Get pool statistics
+    pool_stats = get_pool_stats()
+
+    # Determine overall status
+    status = "healthy" if db_connected else "degraded"
+
+    return {
+        "status": status,
+        "service": "user_management_service",
+        "request_id": get_request_id(),
+        "database": {
+            "connected": db_connected,
+            "latency_ms": round(db_latency_ms, 2),
+            "error": db_error,
+            "type": settings.DATABASE_URL.split("://")[0]
+        },
+        "connection_pool": pool_stats.to_dict(),
+        "thresholds": {
+            "slow_query_ms": settings.SLOW_QUERY_THRESHOLD_MS,
+            "slow_request_ms": settings.SLOW_REQUEST_THRESHOLD_MS
+        }
     }
 
 

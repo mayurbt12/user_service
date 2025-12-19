@@ -78,6 +78,29 @@ class Settings(BaseSettings):
     MAX_USERS: int = 10000
     """Maximum number of users allowed in the system"""
 
+    # Diagnostics Configuration (Google SRE Golden Signals)
+    SLOW_QUERY_THRESHOLD_MS: float = 100.0
+    """Threshold in milliseconds for logging slow database queries"""
+
+    SLOW_REQUEST_THRESHOLD_MS: float = 500.0
+    """Threshold in milliseconds for logging slow HTTP requests"""
+
+    # Database Connection Pool Configuration (SQLAlchemy best practices)
+    DB_POOL_SIZE: int = 10
+    """Base number of persistent database connections (increased from 5 to handle concurrent load)"""
+
+    DB_MAX_OVERFLOW: int = 20
+    """Maximum overflow connections beyond pool_size for burst traffic (increased from 10)"""
+
+    DB_POOL_TIMEOUT: int = 5
+    """Seconds to wait for available connection before timeout (reduced from 30 to match client timeouts)"""
+
+    DB_POOL_RECYCLE: int = 600
+    """Seconds before connection is recycled - 10 minutes (reduced from 30min to prevent stale connections)"""
+
+    DB_POOL_PRE_PING: bool = True
+    """Verify connection is alive before use (recommended for production)"""
+
     class Config:
         """Pydantic config"""
         env_file = ".env"

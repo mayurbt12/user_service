@@ -2,15 +2,23 @@
 
 This module defines SQLAlchemy models and database session management.
 IMPORTANT: All datetime fields are stored as DateTime objects with timezone support.
+
+Diagnostics features:
+- Connection pool monitoring (Google SRE Saturation signal)
+- Query timing for slow query detection
+- Health check utilities
 """
 
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, JSON, Enum as SQLEnum, Index, ForeignKey
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, JSON, Enum as SQLEnum, Index, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone
+from typing import Tuple, Generator
 import enum
+import time
 
 from config import settings
+from diagnostics import add_db_time, get_request_id, PoolStats
 
 # SQLAlchemy Base
 Base = declarative_base()
@@ -396,18 +404,48 @@ class RefreshToken(Base):
         )
 
 
-# Database Engine Setup
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
-    echo=False  # Set to True for SQL debugging
-)
+# Database Engine Setup with connection pool configuration
+# Following SQLAlchemy best practices for production PostgreSQL
+_is_sqlite = "sqlite" in settings.DATABASE_URL
+
+if _is_sqlite:
+    # SQLite: No connection pooling needed
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=False
+    )
+else:
+    # PostgreSQL: Configure connection pool for production
+    engine = create_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        pool_pre_ping=settings.DB_POOL_PRE_PING,
+        # Additional connection management settings
+        pool_use_lifo=True,  # Use LIFO (Last In First Out) for better connection reuse
+    )
 
 # Session Factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Lazy import logger to avoid circular dependency
+_db_logger = None
 
-def get_db():
+
+def _get_db_logger():
+    """Get database logger (lazy initialization)."""
+    global _db_logger
+    if _db_logger is None:
+        from logger_config import setup_logger
+        _db_logger = setup_logger(__name__, 'database.log')
+    return _db_logger
+
+
+def get_db() -> Generator[Session, None, None]:
     """Database session dependency for FastAPI.
 
     Yields:
@@ -417,12 +455,89 @@ def get_db():
         @app.get("/endpoint")
         def endpoint(db: Session = Depends(get_db)):
             # Use db here
+
+    Connection Lifecycle:
+        - Session is created from connection pool
+        - On success: session is closed, returning connection to pool
+        - On exception: session is rolled back then closed to prevent leaks
     """
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        # Explicitly rollback on exceptions to prevent connection leaks
+        db.rollback()
+        raise
     finally:
+        # Always close session to return connection to pool
         db.close()
+
+
+def get_pool_stats() -> PoolStats:
+    """Get current connection pool statistics (Saturation signal).
+
+    Returns:
+        PoolStats: Current pool state for monitoring
+    """
+    if _is_sqlite:
+        return PoolStats()
+
+    pool = engine.pool
+    return PoolStats(
+        pool_size=pool.size(),
+        checked_out=pool.checkedout(),
+        checked_in=pool.checkedin(),
+        overflow=pool.overflow(),
+        invalidated=0
+    )
+
+
+def check_database_connection() -> Tuple[bool, float, str]:
+    """Check database connectivity and measure latency.
+
+    Returns:
+        Tuple of (is_connected, latency_ms, error_message)
+    """
+    start = time.perf_counter()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            conn.commit()
+        latency_ms = (time.perf_counter() - start) * 1000
+        return True, latency_ms, ""
+    except Exception as e:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return False, latency_ms, str(e)
+
+
+def timed_query(session: Session, query_func, *args, **kwargs):
+    """Execute a database operation with timing.
+
+    Args:
+        session: SQLAlchemy session
+        query_func: Function to execute
+        *args, **kwargs: Arguments for query_func
+
+    Returns:
+        Result of query_func
+    """
+    start = time.perf_counter()
+    try:
+        result = query_func(*args, **kwargs)
+        return result
+    finally:
+        duration_ms = (time.perf_counter() - start) * 1000
+        add_db_time(duration_ms)
+
+        # Log slow queries
+        if duration_ms > settings.SLOW_QUERY_THRESHOLD_MS:
+            logger = _get_db_logger()
+            query_info = {
+                "duration_ms": round(duration_ms, 2),
+                "request_id": get_request_id()
+            }
+            add_db_time(0, query_info)
+            logger.warning(f"Slow query detected: {duration_ms:.2f}ms")
 
 
 # Create all tables

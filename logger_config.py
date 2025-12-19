@@ -1,58 +1,75 @@
 """Centralized logging configuration for User Service.
 
-Production-grade logging with rotation and structured formatting.
+Production-grade logging with:
+- Hourly log rotation with 30-day retention (Google/Netflix pattern)
+- Request ID context propagation for distributed tracing
+- Async-safe queue-based logging (prevents event loop blocking)
+- ISO 8601 timestamp naming for easy searching
+- Millisecond precision timestamps
 """
 
 import logging
-from logging.handlers import RotatingFileHandler
-import os
+import sys
+from pathlib import Path
+
+# Add shared_libs to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared_libs.logging_utils import LogConfig, setup_hourly_logger
+
+from diagnostics import get_request_id
 
 # Create logs directory
-LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
+LOG_DIR = Path(__file__).parent / 'logs'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class RequestContextFilter(logging.Filter):
+    """Inject request ID into log records for traceable logging.
+
+    Implements OpenTelemetry-style correlation ID pattern.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Add request_id to log record."""
+        record.request_id = get_request_id()
+        return True
 
 
 def setup_logger(name: str, log_file: str = 'service.log') -> logging.Logger:
-    """Setup production-grade logger with rotation.
+    """Setup production-grade logger with hourly rotation.
+
+    Creates a logger with:
+    - Hourly rotation with 30-day retention
+    - Queue-based handlers (non-blocking, async-safe)
+    - Console handler for real-time monitoring
+    - Request context filter for distributed tracing
+    - ISO 8601 timestamp naming (api.log.2025-12-19_14)
 
     Args:
         name: Logger name (usually __name__)
-        log_file: Log file name (e.g., 'api.log', 'mcp.log')
+        log_file: Log file name (without extension)
 
     Returns:
-        Configured logger instance
+        Configured logger instance with request tracing
     """
-    logger = logging.getLogger(name)
+    # Remove .log extension if present
+    log_name = log_file.replace('.log', '')
 
-    # Avoid duplicate handlers
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(logging.INFO)
-
-    # Production formatter with timestamp
-    formatter = logging.Formatter(
-        '[%(asctime)s] %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+    config = LogConfig(
+        log_name=log_name,
+        log_dir=str(LOG_DIR),
+        log_level="INFO",
+        rotation_when="H",          # Hourly rotation
+        rotation_interval=1,        # Every 1 hour
+        backup_count=720,           # 30 days retention
+        console_logging=True,
+        use_queue=True,             # Async-safe for FastAPI
+        format_string='[%(asctime)s] [%(request_id)s] [%(name)s] %(levelname)s - %(message)s',
+        date_format='%Y-%m-%d %H:%M:%S'
     )
 
-    # File handler - 10MB max, keep 5 backups
-    file_handler = RotatingFileHandler(
-        os.path.join(LOG_DIR, log_file),
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
+    # Add request context filter
+    logger = setup_hourly_logger(config, RequestContextFilter())
     return logger
 
 
