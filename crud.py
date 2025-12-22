@@ -32,6 +32,8 @@ def create_user(
     If organization_id is not provided, automatically creates an organization for the user.
     If organization_id is provided, joins the user to that organization.
 
+    Uses explicit transaction management with rollback on failure.
+
     Args:
         db: Database session
         mobile: User's mobile number (E.164 format)
@@ -53,111 +55,117 @@ def create_user(
     if existing:
         raise ValueError(f"User with mobile {mobile} already exists")
 
-    user_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
+    try:
+        user_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
 
-    # Hash the password
-    password_hash = PasswordHasher.hash_password(password)
+        # Hash the password
+        password_hash = PasswordHasher.hash_password(password)
 
-    # Convert string role to enum
-    role_enum = RoleEnum[role.upper()]
+        # Convert string role to enum
+        role_enum = RoleEnum[role.upper()]
 
-    # Convert organization_role string to enum
-    org_role_enum = OrganizationRoleEnum[organization_role.upper()]
+        # Convert organization_role string to enum
+        org_role_enum = OrganizationRoleEnum[organization_role.upper()]
 
-    # Handle organization creation/joining
-    if organization_id is None:
-        # For new organizations, user should be owner
-        org_role_enum = OrganizationRoleEnum.OWNER
+        # Handle organization creation/joining
+        if organization_id is None:
+            # For new organizations, user should be owner
+            org_role_enum = OrganizationRoleEnum.OWNER
 
-        # Create user first without organization_id
-        db_user = User(
-            id=user_id,
-            mobile=mobile,
-            password_hash=password_hash,
-            role=role_enum,
-            is_active=True,
-            profile=profile or {},
-            organization_id=None,  # Will be set after org creation
-            organization_role=org_role_enum,
-            created_at=now,
-            updated_at=now,
-            last_login=None
-        )
-        db.add(db_user)
-        db.flush()  # Flush to persist user before creating org
+            # Create user first without organization_id
+            db_user = User(
+                id=user_id,
+                mobile=mobile,
+                password_hash=password_hash,
+                role=role_enum,
+                is_active=True,
+                profile=profile or {},
+                organization_id=None,
+                organization_role=org_role_enum,
+                created_at=now,
+                updated_at=now,
+                last_login=None
+            )
+            db.add(db_user)
+            db.flush()
 
-        # Now create organization with the user_id
-        org_name = f"{mobile}'s Organization"
-        db_org = Organization(
-            name=org_name,
-            description="",
-            owner_user_id=user_id,
-            created_at=now,
-            updated_at=now
-        )
-        db.add(db_org)
-        db.flush()  # Flush to get the auto-generated org ID
+            # Create organization with the user_id
+            org_name = f"{mobile}'s Organization"
+            db_org = Organization(
+                name=org_name,
+                description="",
+                owner_user_id=user_id,
+                created_at=now,
+                updated_at=now
+            )
+            db.add(db_org)
+            db.flush()
 
-        # Update user with organization_id (backward compatibility)
-        db_user.organization_id = db_org.id
+            # Update user with organization_id (backward compatibility)
+            db_user.organization_id = db_org.id
 
-        # Create UserOrganization record (new multi-org support)
-        user_org = UserOrganization(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            organization_id=db_org.id,
-            role=org_role_enum,
-            is_active=True,
-            joined_at=now,
-            created_at=now,
-            updated_at=now
-        )
-        db.add(user_org)
+            # Create UserOrganization record (new multi-org support)
+            user_org = UserOrganization(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                organization_id=db_org.id,
+                role=org_role_enum,
+                is_active=True,
+                joined_at=now,
+                created_at=now,
+                updated_at=now
+            )
+            db.add(user_org)
 
-        db.commit()
-        db.refresh(db_user)
-        logger.info(f"User created: id={user_id}, mobile={mobile}, role={role}")
-        return db_user
-    else:
-        # Joining existing organization
-        final_org_id = organization_id
+            db.commit()
+            db.refresh(db_user)
+            logger.info(f"User created: id={user_id}, role={role}")
+            return db_user
+        else:
+            # Joining existing organization
+            final_org_id = organization_id
 
-        # Create user
-        db_user = User(
-            id=user_id,
-            mobile=mobile,
-            password_hash=password_hash,
-            role=role_enum,
-            is_active=True,
-            profile=profile or {},
-            organization_id=final_org_id,
-            organization_role=org_role_enum,
-            created_at=now,
-            updated_at=now,
-            last_login=None
-        )
+            # Create user
+            db_user = User(
+                id=user_id,
+                mobile=mobile,
+                password_hash=password_hash,
+                role=role_enum,
+                is_active=True,
+                profile=profile or {},
+                organization_id=final_org_id,
+                organization_role=org_role_enum,
+                created_at=now,
+                updated_at=now,
+                last_login=None
+            )
 
-        db.add(db_user)
-        db.flush()  # Flush to get user_id
+            db.add(db_user)
+            db.flush()
 
-        # Create UserOrganization record (new multi-org support)
-        user_org = UserOrganization(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            organization_id=final_org_id,
-            role=org_role_enum,
-            is_active=True,
-            joined_at=now,
-            created_at=now,
-            updated_at=now
-        )
-        db.add(user_org)
+            # Create UserOrganization record (new multi-org support)
+            user_org = UserOrganization(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                organization_id=final_org_id,
+                role=org_role_enum,
+                is_active=True,
+                joined_at=now,
+                created_at=now,
+                updated_at=now
+            )
+            db.add(user_org)
 
-        db.commit()
-        db.refresh(db_user)
-        logger.info(f"User created: id={user_id}, mobile={mobile}, role={role}, org_id={final_org_id}")
-        return db_user
+            db.commit()
+            db.refresh(db_user)
+            logger.info(f"User created: id={user_id}, role={role}, org_id={final_org_id}")
+            return db_user
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"User creation failed: {e}")
+        raise
 
 
 def get_user_by_mobile(db: Session, mobile: str) -> Optional[User]:
@@ -480,6 +488,45 @@ def get_users_count(db: Session) -> int:
     return db.query(User).count()
 
 
+def get_user_stats_aggregated(db: Session) -> dict:
+    """Get user statistics using a single aggregated query.
+
+    Uses SQL aggregation to count users by status and role in one query,
+    avoiding N+1 query problem.
+
+    Args:
+        db: Database session
+
+    Returns:
+        dict: User statistics with total, active/inactive counts, and by-role breakdown
+    """
+    from sqlalchemy import func, case
+
+    stats = db.query(
+        func.count(User.id).label('total'),
+        func.sum(case((User.is_active == True, 1), else_=0)).label('active'),
+        func.sum(case((User.is_active == False, 1), else_=0)).label('inactive'),
+        func.sum(case((User.role == RoleEnum.SYSTEM_ADMIN, 1), else_=0)).label('system_admin'),
+        func.sum(case((User.role == RoleEnum.MANAGER, 1), else_=0)).label('manager'),
+        func.sum(case((User.role == RoleEnum.MODERATOR, 1), else_=0)).label('moderator'),
+        func.sum(case((User.role == RoleEnum.USER, 1), else_=0)).label('user'),
+        func.sum(case((User.role == RoleEnum.GUEST, 1), else_=0)).label('guest'),
+    ).first()
+
+    return {
+        "total_users": stats.total or 0,
+        "active_users": int(stats.active or 0),
+        "inactive_users": int(stats.inactive or 0),
+        "by_role": {
+            "system_admin": int(stats.system_admin or 0),
+            "manager": int(stats.manager or 0),
+            "moderator": int(stats.moderator or 0),
+            "user": int(stats.user or 0),
+            "guest": int(stats.guest or 0)
+        }
+    }
+
+
 # Refresh Token CRUD Operations
 
 def save_refresh_token(db: Session, user_id: str, token: str, expires_at: datetime) -> RefreshToken:
@@ -745,35 +792,23 @@ def add_team_member_to_organization(
 def list_organization_members(db: Session, org_id: int) -> List[User]:
     """List all members of an organization.
 
-    Queries from UserOrganization table for accurate membership data.
+    Uses JOIN query for optimal performance, avoiding N+1 query problem.
 
     Args:
         db: Database session
         org_id: Organization ID
 
     Returns:
-        List[User]: List of users in the organization
+        List[User]: List of users in the organization, ordered by join date
     """
-    # Query UserOrganization table to get active members
-    user_org_records = db.query(UserOrganization).filter(
+    return db.query(User).join(
+        UserOrganization, User.id == UserOrganization.user_id
+    ).filter(
         and_(
             UserOrganization.organization_id == org_id,
             UserOrganization.is_active == True
         )
     ).order_by(UserOrganization.joined_at.desc()).all()
-
-    # Get user IDs
-    user_ids = [uo.user_id for uo in user_org_records]
-
-    # Fetch user objects
-    if not user_ids:
-        return []
-
-    users = db.query(User).filter(User.id.in_(user_ids)).all()
-
-    # Sort users to match the order of user_org_records
-    user_dict = {user.id: user for user in users}
-    return [user_dict[uid] for uid in user_ids if uid in user_dict]
 
 
 def remove_team_member_from_organization(db: Session, org_id: int, user_id: str) -> Tuple[bool, str]:

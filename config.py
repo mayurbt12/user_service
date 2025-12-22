@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = True
     """Verify connection is alive before use (recommended for production)"""
 
+    # CORS Configuration
+    CORS_ORIGINS: str = "http://localhost:1800,http://localhost:3000"
+    """Comma-separated list of allowed CORS origins. Override in production."""
+
     class Config:
         """Pydantic config"""
         env_file = ".env"

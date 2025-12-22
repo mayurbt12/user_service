@@ -33,6 +33,8 @@ class OrganizationValidator:
 
     # Cache duration for organization memberships (5 minutes)
     CACHE_TTL_SECONDS = 300
+    # Maximum cache size to prevent memory leaks
+    MAX_CACHE_SIZE = 10000
 
     def __init__(self):
         """Initialize validator with cache."""
@@ -53,7 +55,9 @@ class OrganizationValidator:
         return age < self.CACHE_TTL_SECONDS
 
     def _set_cache(self, cache_key: str, value: any):
-        """Set cache value with timestamp."""
+        """Set cache value with timestamp. Evicts stale entries if cache is full."""
+        if len(self._cache) >= self.MAX_CACHE_SIZE:
+            self._evict_stale_entries()
         self._cache[cache_key] = value
         self._cache_timestamps[cache_key] = datetime.now(timezone.utc)
 
@@ -62,6 +66,19 @@ class OrganizationValidator:
         if self._is_cache_valid(cache_key):
             return self._cache.get(cache_key)
         return None
+
+    def _evict_stale_entries(self):
+        """Remove expired cache entries to prevent memory leaks."""
+        now = datetime.now(timezone.utc)
+        stale_keys = [
+            k for k, ts in self._cache_timestamps.items()
+            if (now - ts).total_seconds() > self.CACHE_TTL_SECONDS
+        ]
+        for key in stale_keys:
+            self._cache.pop(key, None)
+            self._cache_timestamps.pop(key, None)
+        if stale_keys:
+            logger.debug(f"Evicted {len(stale_keys)} stale cache entries")
 
     def invalidate_cache_for_user(self, user_id: str):
         """Invalidate all cached entries for a user."""

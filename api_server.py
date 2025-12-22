@@ -4,6 +4,7 @@ This module provides HTTP endpoints for user management and authentication.
 Designed for frontend/external application access.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -13,6 +14,7 @@ from datetime import timedelta, datetime, timezone
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import crud
 import schemas
@@ -27,8 +29,46 @@ from diagnostics import get_request_id
 
 logger = setup_logger(__name__, 'api.log')
 
+
+def mask_mobile(mobile: str) -> str:
+    """Mask mobile number for logging (PII protection)."""
+    if not mobile or len(mobile) <= 4:
+        return '****'
+    return mobile[:2] + '*' * (len(mobile) - 4) + mobile[-2:]
+
+
 # Create rate limiter
 limiter = Limiter(key_func=get_remote_address)
+
+# Background scheduler for cleanup tasks
+scheduler = BackgroundScheduler()
+
+
+def scheduled_token_cleanup():
+    """Run expired token cleanup task."""
+    db = database.SessionLocal()
+    try:
+        count = crud.cleanup_expired_tokens(db)
+        if count > 0:
+            logger.info(f"Cleaned up {count} expired tokens")
+    except Exception as e:
+        logger.error(f"Token cleanup failed: {e}")
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - startup and shutdown."""
+    # Startup
+    scheduler.add_job(scheduled_token_cleanup, 'interval', hours=24)
+    scheduler.start()
+    logger.info("Token cleanup scheduler started (every 24 hours)")
+    yield
+    # Shutdown
+    scheduler.shutdown()
+    logger.info("Token cleanup scheduler stopped")
+
 
 # Create FastAPI application
 app = FastAPI(
@@ -36,20 +76,16 @@ app = FastAPI(
     description="Secure user management with JWT authentication and role-based access control",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Configure rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Allow your frontend origin
-origins = [
-    "http://localhost:1800",      # OneCall frontend (default)
-    "http://localhost:3000",      # Alternative frontend port
-    "http://3.6.152.132:3000",    # Public IP for your frontend
-    "http://3.6.152.132:1800",    # Public IP for OneCall frontend
-]
+# CORS origins from config (comma-separated)
+origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
 
 # Configure CORS for frontend access
 app.add_middleware(
@@ -232,7 +268,7 @@ def register_user(
         # Validate password strength
         is_valid, error_msg = validate_password_strength(user_data.password)
         if not is_valid:
-            logger.warning(f"Registration failed: weak password for mobile={user_data.mobile}")
+            logger.warning(f"Registration failed: weak password for mobile={mask_mobile(user_data.mobile)}")
             raise HTTPException(status_code=400, detail=error_msg)
 
         # Create user
@@ -245,14 +281,14 @@ def register_user(
             organization_id=user_data.organization_id,
             organization_role=user_data.organization_role
         )
-        logger.info(f"User registered: mobile={user_data.mobile}, role={user_data.role}")
+        logger.info(f"User registered: mobile={mask_mobile(user_data.mobile)}, role={user_data.role}")
         return user
 
     except ValueError as e:
-        logger.warning(f"Registration failed: mobile={user_data.mobile}, error={str(e)}")
+        logger.warning(f"Registration failed: mobile={mask_mobile(user_data.mobile)}, error={str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Registration error: mobile={user_data.mobile}, error={str(e)}")
+        logger.error(f"Registration error: mobile={mask_mobile(user_data.mobile)}, error={str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating user: {str(e)}")
 
 
@@ -276,7 +312,7 @@ def login(
     # Authenticate user
     user = crud.authenticate_user(db, credentials.mobile, credentials.password)
     if not user:
-        logger.warning(f"Login failed: mobile={credentials.mobile} (invalid credentials)")
+        logger.warning(f"Login failed: mobile={mask_mobile(credentials.mobile)} (invalid credentials)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -284,7 +320,7 @@ def login(
 
     # Update last login
     crud.update_last_login(db, user.id)
-    logger.info(f"Login successful: user_id={user.id}, mobile={user.mobile}")
+    logger.info(f"Login successful: user_id={user.id}")
 
     # Get organization info from UserOrganization table (or fallback to deprecated fields)
     org_id = user.get_default_organization_id(db)
@@ -576,9 +612,10 @@ def list_all_users(
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
 def get_user_by_id(
     user_id: str,
+    current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
-    """Get user by ID (system_admin/manager/moderator/admin only)."""
+    """Get user by ID (authenticated users only)."""
     user = crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -615,9 +652,10 @@ def get_user_by_mobile_number(
 def update_user_role(
     user_id: str,
     role_data: schemas.RoleUpdate,
+    current_user: database.User = Depends(require_role(["system_admin"])),
     db: Session = Depends(database.get_db)
 ):
-    """Update user role (system_admin/manager/admin only).
+    """Update user role (system_admin only).
 
     Request body example:
     ```json
@@ -630,6 +668,7 @@ def update_user_role(
         user = crud.update_user_role(db, user_id, role_data.role)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        logger.info(f"Role updated: target_id={user_id}, new_role={role_data.role}, by_admin={current_user.id}")
         return user
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error updating role: {str(e)}")
@@ -704,6 +743,7 @@ def deactivate_user(
 @app.put("/users/{user_id}/activate", response_model=schemas.MessageResponse)
 def activate_user(
     user_id: str,
+    current_user: database.User = Depends(require_role(["system_admin"])),
     db: Session = Depends(database.get_db)
 ):
     """Activate user account (system_admin only)."""
@@ -711,7 +751,7 @@ def activate_user(
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
 
-    logger.info(f"User activated: target_id={user_id}")
+    logger.info(f"User activated: target_id={user_id}, by_admin={current_user.id}")
     return {
         "message": f"User {user_id} activated successfully",
         "success": True
@@ -769,32 +809,14 @@ def admin_reset_user_password(
 
 @app.get("/users/stats/overview")
 def get_user_statistics(
+    current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
-    """Get user statistics (system_admin/manager/moderator/admin only)."""
-    total = crud.get_users_count(db)
+    """Get user statistics (authenticated users only).
 
-    active_users, _ = crud.list_users(db, is_active=True, page=1, page_size=10000)
-    inactive_users, _ = crud.list_users(db, is_active=False, page=1, page_size=10000)
-
-    system_admins, _ = crud.list_users(db, role="system_admin", page=1, page_size=10000)
-    managers, _ = crud.list_users(db, role="manager", page=1, page_size=10000)
-    moderators, _ = crud.list_users(db, role="moderator", page=1, page_size=10000)
-    users, _ = crud.list_users(db, role="user", page=1, page_size=10000)
-    guests, _ = crud.list_users(db, role="guest", page=1, page_size=10000)
-
-    return {
-        "total_users": total,
-        "active_users": len(active_users),
-        "inactive_users": len(inactive_users),
-        "by_role": {
-            "system_admin": len(system_admins),
-            "manager": len(managers),
-            "moderator": len(moderators),
-            "user": len(users),
-            "guest": len(guests)
-        }
-    }
+    Uses aggregated query for optimal performance.
+    """
+    return crud.get_user_stats_aggregated(db)
 
 
 # ============================================================================

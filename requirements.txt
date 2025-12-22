@@ -22,6 +22,9 @@ mcp==1.22.0
 
 # Python Standard Library Extensions
 python-multipart==0.0.20
-slowapi==0.1.9  # Allow newer versions for better compatibility
-redis==5.0.1  # Allow newer versions for better compatibility
-psycopg2-binary==2.9.11  # Updated for Python 3.10-3.13 compatibility
+slowapi==0.1.9
+redis==5.0.1
+psycopg2-binary==2.9.11
+
+# Background Scheduling
+APScheduler==3.10.4

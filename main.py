@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Unified entry point for User Management Service.
+"""Entry point for User Management Service.
 
-This module starts both services (API and MCP) using subprocess.
+This module starts the API server.
 Designed to simplify service management and deployment.
 """
 
@@ -38,6 +38,15 @@ def shutdown_services():
     global processes
 
     logger.info("Stopping all services...")
+
+    # Dispose database connections to prevent leaks
+    try:
+        from database import engine
+        engine.dispose()
+        logger.info("Database connections disposed")
+    except Exception as e:
+        logger.warning(f"Failed to dispose database connections: {e}")
+
     for process in processes:
         if process.poll() is None:
             logger.info(f"Terminating process (PID: {process.pid})")
@@ -83,24 +92,10 @@ def main():
         processes.append(api_process)
         time.sleep(2)
 
-        logger.info("Starting MCP server...")
-        mcp_env = os.environ.copy()
-        mcp_env['MCP_TRANSPORT'] = 'sse'
-        mcp_process = subprocess.Popen(
-            ["python3", "mcp_server.py"],
-            cwd=current_dir,
-            env=mcp_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT
-        )
-        processes.append(mcp_process)
-        time.sleep(2)
-
         logger.info("="*60)
-        logger.info("All services started successfully!")
+        logger.info("Service started successfully!")
         logger.info("  - API Server: http://127.0.0.1:8007")
         logger.info("  - API Docs: http://127.0.0.1:8007/docs")
-        logger.info("  - MCP Server: http://127.0.0.1:8008/sse")
         logger.info("="*60)
 
         # Monitor processes and restart if any crash
