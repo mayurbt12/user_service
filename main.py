@@ -3,6 +3,11 @@
 
 This module starts the API server.
 Designed to simplify service management and deployment.
+
+FIX: Changed stdout from subprocess.PIPE to file logging to prevent
+deadlock when pipe buffer fills (64KB). This follows the pattern used
+by call_history_service and ticket_service which have 0 restarts.
+See: https://docs.python.org/3/library/subprocess.html (PIPE deadlock warning)
 """
 
 import subprocess
@@ -18,6 +23,7 @@ logger = setup_logger(__name__, 'service.log')
 
 # Global list to track all running processes
 processes: List[subprocess.Popen] = []
+log_files: List = []  # Track log file handles for cleanup
 shutdown_requested = False
 
 
@@ -35,7 +41,7 @@ def signal_handler(signum, frame):
 
 def shutdown_services():
     """Stop all running services."""
-    global processes
+    global processes, log_files
 
     logger.info("Stopping all services...")
 
@@ -61,13 +67,20 @@ def shutdown_services():
             process.kill()
             process.wait()
 
+    # Close log files
+    for log_file in log_files:
+        try:
+            log_file.close()
+        except Exception:
+            pass
+
     logger.info("All services stopped")
     sys.exit(0)
 
 
 def main():
     """Main entry point - start all services."""
-    global processes
+    global processes, log_files
 
     # Register signal handlers
     signal.signal(signal.SIGTERM, signal_handler)
@@ -80,16 +93,27 @@ def main():
     # Get current directory
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
+    # Create logs directory if it doesn't exist
+    logs_dir = os.path.join(current_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+
     # Start all processes
     try:
+        # FIX: Use file logging instead of subprocess.PIPE to prevent deadlock
+        # when the 64KB pipe buffer fills. This pattern is proven working in
+        # call_history_service and ticket_service (0 restarts).
+
         logger.info("Starting API server...")
+        api_log = open(os.path.join(logs_dir, 'api.log'), 'a')
+        log_files.append(api_log)
         api_process = subprocess.Popen(
             ["python3", "api_server.py"],
             cwd=current_dir,
-            stdout=subprocess.PIPE,
+            stdout=api_log,  # Write to file, not PIPE (prevents deadlock)
             stderr=subprocess.STDOUT
         )
         processes.append(api_process)
+        logger.info(f"API Server started with PID {api_process.pid}")
         time.sleep(2)
 
         logger.info("="*60)

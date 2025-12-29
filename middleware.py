@@ -272,22 +272,22 @@ def get_current_user_context(
         )
 
     # Extract organization info from token
-    token_org_id = payload.get("organization_id")
-    token_org_role_str = payload.get("organization_role")
-    token_org_role = None
+    token_organization_id = payload.get("organization_id")
+    token_organization_role_str = payload.get("organization_role")
+    token_organization_role = None
 
-    if token_org_role_str:
+    if token_organization_role_str:
         try:
-            token_org_role = OrganizationRoleEnum(token_org_role_str)
+            token_organization_role = OrganizationRoleEnum(token_organization_role_str)
         except ValueError:
-            logger.warning(f"Invalid organization role in token: {token_org_role_str}")
+            logger.warning(f"Invalid organization role in token: {token_organization_role_str}")
 
     # Create and return enhanced context
     return CurrentUserContext(
         user=user,
         db_session=db,
-        token_organization_id=token_org_id,
-        token_organization_role=token_org_role
+        token_organization_id=token_organization_id,
+        token_organization_role=token_organization_role
     )
 
 

@@ -263,8 +263,8 @@ class User(Base):
         """String representation"""
         return (
             f"<User(id={self.id}, mobile={self.mobile}, "
-            f"role={self.role.value}, org_id={self.organization_id}, "
-            f"org_role={self.organization_role.value if self.organization_role else None}, "
+            f"role={self.role.value}, organization_id={self.organization_id}, "
+            f"organization_role={self.organization_role.value if self.organization_role else None}, "
             f"active={self.is_active})>"
         )
 
@@ -346,7 +346,7 @@ class UserOrganization(Base):
         """String representation"""
         return (
             f"<UserOrganization(id={self.id}, user_id={self.user_id}, "
-            f"org_id={self.organization_id}, role={self.role.value}, "
+            f"organization_id={self.organization_id}, role={self.role.value}, "
             f"active={self.is_active})>"
         )
 

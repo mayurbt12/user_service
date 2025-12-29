@@ -124,7 +124,7 @@ def create_user(
             return db_user
         else:
             # Joining existing organization
-            final_org_id = organization_id
+            final_organization_id = organization_id
 
             # Create user
             db_user = User(
@@ -134,7 +134,7 @@ def create_user(
                 role=role_enum,
                 is_active=True,
                 profile=profile or {},
-                organization_id=final_org_id,
+                organization_id=final_organization_id,
                 organization_role=org_role_enum,
                 created_at=now,
                 updated_at=now,
@@ -148,7 +148,7 @@ def create_user(
             user_org = UserOrganization(
                 id=str(uuid.uuid4()),
                 user_id=user_id,
-                organization_id=final_org_id,
+                organization_id=final_organization_id,
                 role=org_role_enum,
                 is_active=True,
                 joined_at=now,
@@ -159,7 +159,7 @@ def create_user(
 
             db.commit()
             db.refresh(db_user)
-            logger.info(f"User created: id={user_id}, role={role}, org_id={final_org_id}")
+            logger.info(f"User created: id={user_id}, role={role}, organization_id={final_organization_id}")
             return db_user
 
     except Exception as e:
@@ -670,31 +670,31 @@ def create_organization(db: Session, name: str, owner_user_id: str, description:
     return db_org
 
 
-def get_organization_by_id(db: Session, org_id: int) -> Optional[Organization]:
+def get_organization_by_id(db: Session, organization_id: int) -> Optional[Organization]:
     """Get an organization by ID.
 
     Args:
         db: Database session
-        org_id: Organization ID
+        organization_id: Organization ID
 
     Returns:
         Optional[Organization]: Organization object if found, None otherwise
     """
-    return db.query(Organization).filter(Organization.id == org_id).first()
+    return db.query(Organization).filter(Organization.id == organization_id).first()
 
 
-def update_organization(db: Session, org_id: int, updates: dict) -> Optional[Organization]:
+def update_organization(db: Session, organization_id: int, updates: dict) -> Optional[Organization]:
     """Update organization data.
 
     Args:
         db: Database session
-        org_id: Organization ID
+        organization_id: Organization ID
         updates: Dictionary of fields to update (name, description)
 
     Returns:
         Optional[Organization]: Updated organization object if found, None otherwise
     """
-    org = get_organization_by_id(db, org_id)
+    org = get_organization_by_id(db, organization_id)
     if not org:
         return None
 
@@ -713,7 +713,7 @@ def update_organization(db: Session, org_id: int, updates: dict) -> Optional[Org
 
 def add_team_member_to_organization(
     db: Session,
-    org_id: int,
+    organization_id: int,
     mobile: str,
     password: str,
     profile: dict = None,
@@ -723,7 +723,7 @@ def add_team_member_to_organization(
 
     Args:
         db: Database session
-        org_id: Organization ID
+        organization_id: Organization ID
         mobile: Team member's mobile number
         password: Plain text password (will be hashed)
         profile: Optional profile data dictionary
@@ -736,9 +736,9 @@ def add_team_member_to_organization(
         ValueError: If user with mobile already exists or organization not found
     """
     # Check if organization exists
-    org = get_organization_by_id(db, org_id)
+    org = get_organization_by_id(db, organization_id)
     if not org:
-        raise ValueError(f"Organization with ID {org_id} not found")
+        raise ValueError(f"Organization with ID {organization_id} not found")
 
     # Check if user already exists
     existing = get_user_by_mobile(db, mobile)
@@ -761,7 +761,7 @@ def add_team_member_to_organization(
         role=role_enum,
         is_active=True,
         profile=profile or {},
-        organization_id=org_id,
+        organization_id=organization_id,
         organization_role=OrganizationRoleEnum.MEMBER,
         created_at=now,
         updated_at=now,
@@ -775,7 +775,7 @@ def add_team_member_to_organization(
     user_org = UserOrganization(
         id=str(uuid.uuid4()),
         user_id=user_id,
-        organization_id=org_id,
+        organization_id=organization_id,
         role=OrganizationRoleEnum.MEMBER,
         is_active=True,
         joined_at=now,
@@ -789,14 +789,14 @@ def add_team_member_to_organization(
     return db_user
 
 
-def list_organization_members(db: Session, org_id: int) -> List[User]:
+def list_organization_members(db: Session, organization_id: int) -> List[User]:
     """List all members of an organization.
 
     Uses JOIN query for optimal performance, avoiding N+1 query problem.
 
     Args:
         db: Database session
-        org_id: Organization ID
+        organization_id: Organization ID
 
     Returns:
         List[User]: List of users in the organization, ordered by join date
@@ -805,13 +805,13 @@ def list_organization_members(db: Session, org_id: int) -> List[User]:
         UserOrganization, User.id == UserOrganization.user_id
     ).filter(
         and_(
-            UserOrganization.organization_id == org_id,
+            UserOrganization.organization_id == organization_id,
             UserOrganization.is_active == True
         )
     ).order_by(UserOrganization.joined_at.desc()).all()
 
 
-def remove_team_member_from_organization(db: Session, org_id: int, user_id: str) -> Tuple[bool, str]:
+def remove_team_member_from_organization(db: Session, organization_id: int, user_id: str) -> Tuple[bool, str]:
     """Remove a team member from an organization (deactivate membership).
 
     Deactivates the UserOrganization record instead of the user account,
@@ -819,7 +819,7 @@ def remove_team_member_from_organization(db: Session, org_id: int, user_id: str)
 
     Args:
         db: Database session
-        org_id: Organization ID
+        organization_id: Organization ID
         user_id: User ID to remove
 
     Returns:
@@ -833,7 +833,7 @@ def remove_team_member_from_organization(db: Session, org_id: int, user_id: str)
     user_org = db.query(UserOrganization).filter(
         and_(
             UserOrganization.user_id == user_id,
-            UserOrganization.organization_id == org_id,
+            UserOrganization.organization_id == organization_id,
             UserOrganization.is_active == True
         )
     ).first()

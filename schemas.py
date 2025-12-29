@@ -132,10 +132,15 @@ class UserDeleteRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """Schema for authentication token response."""
+    """Schema for authentication token response.
+
+    Note: refresh_token is optional because in the new secure auth flow,
+    the refresh token is set as an httpOnly cookie instead of being
+    returned in the response body.
+    """
 
     access_token: str = Field(..., description="JWT access token")
-    refresh_token: str = Field(..., description="JWT refresh token")
+    refresh_token: Optional[str] = Field(None, description="JWT refresh token (optional, may be in httpOnly cookie)")
     token_type: str = Field(default="bearer", description="Token type")
     expires_in: int = Field(..., description="Access token expiration time in seconds")
 

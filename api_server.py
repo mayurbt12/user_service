@@ -5,7 +5,7 @@ Designed for frontend/external application access.
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -296,10 +296,14 @@ def register_user(
 @limiter.limit("5/minute")  # Max 5 login attempts per minute per IP
 def login(
     request: Request,
+    response: Response,
     credentials: schemas.UserLogin,
     db: Session = Depends(database.get_db)
 ):
-    """Authenticate user and return JWT tokens.
+    """Authenticate user and return JWT access token.
+
+    The refresh token is set as an httpOnly cookie for security.
+    Access token is returned in the response body.
 
     Request body example:
     ```json
@@ -323,16 +327,16 @@ def login(
     logger.info(f"Login successful: user_id={user.id}")
 
     # Get organization info from UserOrganization table (or fallback to deprecated fields)
-    org_id = user.get_default_organization_id(db)
-    org_role = user.get_default_organization_role(db)
+    organization_id = user.get_default_organization_id(db)
+    organization_role = user.get_default_organization_role(db)
 
     # Create access token
     access_token_data = {
         "user_id": user.id,
         "mobile": user.mobile,
         "role": user.role.value,
-        "organization_id": org_id,
-        "organization_role": org_role.value if org_role else None
+        "organization_id": organization_id,
+        "organization_role": organization_role.value if organization_role else None
     }
     access_token = JWTHandler.create_access_token(access_token_data)
 
@@ -344,9 +348,20 @@ def login(
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     crud.save_refresh_token(db, user.id, refresh_token, expires_at)
 
+    # Set refresh token as httpOnly cookie (secure token storage)
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=settings.ENVIRONMENT != "development",  # HTTPS only in production
+        samesite="strict",  # CSRF protection
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        path="/api/auth"  # Only sent to auth endpoints
+    )
+
     return {
         "access_token": access_token,
-        "refresh_token": refresh_token,
+        "refresh_token": refresh_token,  # Keep for backward compatibility during migration
         "token_type": "bearer",
         "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
     }
@@ -417,16 +432,119 @@ def refresh_token(
     }
 
 
+@app.post("/auth/silent-refresh")
+@limiter.limit("10/minute")
+def silent_refresh(
+    request: Request,
+    response: Response,
+    db: Session = Depends(database.get_db)
+):
+    """Refresh access token using refresh token from httpOnly cookie.
+
+    This endpoint is called automatically by frontend on page load
+    to restore authentication without user interaction.
+
+    The refresh token is read from the httpOnly cookie (not request body).
+    """
+    # Get refresh token from cookie
+    refresh_token_value = request.cookies.get("refresh_token")
+    if not refresh_token_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token cookie"
+        )
+
+    # Verify refresh token
+    payload = JWTHandler.verify_token(refresh_token_value, token_type="refresh")
+    if not payload:
+        # Clear invalid cookie
+        response.delete_cookie(
+            key="refresh_token",
+            path="/api/auth",
+            httponly=True,
+            secure=settings.ENVIRONMENT != "development",
+            samesite="strict"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token"
+        )
+
+    # Check if token exists and is not revoked
+    db_token = crud.get_refresh_token(db, refresh_token_value)
+    if not db_token or db_token.is_revoked:
+        response.delete_cookie(
+            key="refresh_token",
+            path="/api/auth",
+            httponly=True,
+            secure=settings.ENVIRONMENT != "development",
+            samesite="strict"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked"
+        )
+
+    # Check if token is expired
+    if db_token.expires_at < datetime.now(timezone.utc):
+        response.delete_cookie(
+            key="refresh_token",
+            path="/api/auth",
+            httponly=True,
+            secure=settings.ENVIRONMENT != "development",
+            samesite="strict"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired"
+        )
+
+    user_id = payload.get("user_id")
+    user = crud.get_user_by_id(db, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive"
+        )
+
+    # Get organization info
+    organization_id = user.get_default_organization_id(db)
+    organization_role = user.get_default_organization_role(db)
+
+    # Create new access token
+    access_token_data = {
+        "user_id": user.id,
+        "mobile": user.mobile,
+        "role": user.role.value,
+        "organization_id": organization_id,
+        "organization_role": organization_role.value if organization_role else None
+    }
+    access_token = JWTHandler.create_access_token(access_token_data)
+
+    logger.info(f"Silent refresh successful: user_id={user.id}")
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    }
+
+
 @app.post("/auth/logout", response_model=schemas.MessageResponse)
 def logout(
     request: Request,
-    token_request: schemas.RefreshTokenRequest,
+    response: Response,
+    token_request: Optional[schemas.RefreshTokenRequest] = None,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
-    """Logout user by revoking both access and refresh tokens.
+    """Logout user by revoking tokens and clearing httpOnly cookie.
 
-    Request body example:
+    Supports both:
+    - Legacy: refresh_token in request body
+    - New: refresh_token from httpOnly cookie
+
+    Request body example (optional for backward compatibility):
     ```json
     {
         "refresh_token": "eyJhbGc..."
@@ -440,13 +558,25 @@ def logout(
         # Add access token to blacklist with remaining TTL
         TokenBlacklist.add_token(access_token, expires_in_seconds=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
-    # Revoke the refresh token (from database)
-    success = crud.revoke_refresh_token(db, token_request.refresh_token)
-    if not success:
-        raise HTTPException(status_code=404, detail="Refresh token not found")
+    # Get refresh token from cookie (new method) or request body (legacy)
+    refresh_token_value = request.cookies.get("refresh_token")
+    if not refresh_token_value and token_request:
+        refresh_token_value = token_request.refresh_token
 
-    # Also blacklist the refresh token
-    TokenBlacklist.add_token(token_request.refresh_token, expires_in_seconds=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600)
+    if refresh_token_value:
+        # Revoke the refresh token in database
+        crud.revoke_refresh_token(db, refresh_token_value)
+        # Also blacklist the refresh token
+        TokenBlacklist.add_token(refresh_token_value, expires_in_seconds=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600)
+
+    # Clear the httpOnly cookie
+    response.delete_cookie(
+        key="refresh_token",
+        path="/api/auth",
+        httponly=True,
+        secure=settings.ENVIRONMENT != "development",
+        samesite="strict"
+    )
 
     logger.info(f"User logged out: user_id={current_user.id}")
     return {
@@ -862,9 +992,9 @@ def create_organization_endpoint(
         raise HTTPException(status_code=500, detail=f"Error creating organization: {str(e)}")
 
 
-@app.get("/organizations/{org_id}", response_model=schemas.OrganizationResponse)
+@app.get("/organizations/{organization_id}", response_model=schemas.OrganizationResponse)
 def get_organization_endpoint(
-    org_id: int,
+    organization_id: int,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
@@ -875,13 +1005,13 @@ def get_organization_endpoint(
     - Organization members
     - System administrators
     """
-    org = crud.get_organization_by_id(db, org_id)
+    org = crud.get_organization_by_id(db, organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Check access permissions
     if current_user.role != database.RoleEnum.SYSTEM_ADMIN:
-        if current_user.organization_id != org_id:
+        if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have access to this organization"
@@ -890,9 +1020,9 @@ def get_organization_endpoint(
     return org
 
 
-@app.put("/organizations/{org_id}", response_model=schemas.OrganizationResponse)
+@app.put("/organizations/{organization_id}", response_model=schemas.OrganizationResponse)
 def update_organization_endpoint(
-    org_id: int,
+    organization_id: int,
     org_data: schemas.OrganizationUpdate,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
@@ -911,12 +1041,12 @@ def update_organization_endpoint(
     }
     ```
     """
-    org = crud.get_organization_by_id(db, org_id)
+    org = crud.get_organization_by_id(db, organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Check access permissions
-    is_owner = (current_user.organization_id == org_id and
+    is_owner = (current_user.organization_id == organization_id and
                 current_user.organization_role == database.OrganizationRoleEnum.OWNER)
     is_system_admin = current_user.role == database.RoleEnum.SYSTEM_ADMIN
 
@@ -928,16 +1058,16 @@ def update_organization_endpoint(
 
     try:
         updates = org_data.model_dump(exclude_unset=True)
-        updated_org = crud.update_organization(db, org_id, updates)
+        updated_org = crud.update_organization(db, organization_id, updates)
         return updated_org
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating organization: {str(e)}")
 
 
-@app.post("/organizations/{org_id}/members", response_model=schemas.UserResponse, status_code=201)
+@app.post("/organizations/{organization_id}/members", response_model=schemas.UserResponse, status_code=201)
 def add_team_member_endpoint(
-    org_id: int,
+    organization_id: int,
     member_data: schemas.AddTeamMemberRequest,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
@@ -956,12 +1086,12 @@ def add_team_member_endpoint(
     }
     ```
     """
-    org = crud.get_organization_by_id(db, org_id)
+    org = crud.get_organization_by_id(db, organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Only organization owner can add team members
-    is_owner = (current_user.organization_id == org_id and
+    is_owner = (current_user.organization_id == organization_id and
                 current_user.organization_role == database.OrganizationRoleEnum.OWNER)
 
     if not is_owner:
@@ -979,7 +1109,7 @@ def add_team_member_endpoint(
         # Add team member
         user = crud.add_team_member_to_organization(
             db,
-            org_id=org_id,
+            organization_id=organization_id,
             mobile=member_data.mobile,
             password=member_data.password,
             profile=member_data.profile,
@@ -993,9 +1123,9 @@ def add_team_member_endpoint(
         raise HTTPException(status_code=500, detail=f"Error adding team member: {str(e)}")
 
 
-@app.get("/organizations/{org_id}/members", response_model=schemas.UserListResponse)
+@app.get("/organizations/{organization_id}/members", response_model=schemas.UserListResponse)
 def list_team_members_endpoint(
-    org_id: int,
+    organization_id: int,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
@@ -1006,20 +1136,20 @@ def list_team_members_endpoint(
     - Organization members
     - System administrators
     """
-    org = crud.get_organization_by_id(db, org_id)
+    org = crud.get_organization_by_id(db, organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Check access permissions
     if current_user.role != database.RoleEnum.SYSTEM_ADMIN:
-        if current_user.organization_id != org_id:
+        if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have access to this organization"
             )
 
     try:
-        members = crud.list_organization_members(db, org_id)
+        members = crud.list_organization_members(db, organization_id)
         return {
             "users": members,
             "total": len(members),
@@ -1031,9 +1161,9 @@ def list_team_members_endpoint(
         raise HTTPException(status_code=500, detail=f"Error listing team members: {str(e)}")
 
 
-@app.delete("/organizations/{org_id}/members/{user_id}", response_model=schemas.MessageResponse)
+@app.delete("/organizations/{organization_id}/members/{user_id}", response_model=schemas.MessageResponse)
 def remove_team_member_endpoint(
-    org_id: int,
+    organization_id: int,
     user_id: str,
     current_user: database.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
@@ -1043,12 +1173,12 @@ def remove_team_member_endpoint(
     Only organization owner can remove team members.
     Cannot remove the organization owner.
     """
-    org = crud.get_organization_by_id(db, org_id)
+    org = crud.get_organization_by_id(db, organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Only organization owner can remove team members
-    is_owner = (current_user.organization_id == org_id and
+    is_owner = (current_user.organization_id == organization_id and
                 current_user.organization_role == database.OrganizationRoleEnum.OWNER)
 
     if not is_owner:
@@ -1058,7 +1188,7 @@ def remove_team_member_endpoint(
         )
 
     try:
-        success, error_msg = crud.remove_team_member_from_organization(db, org_id, user_id)
+        success, error_msg = crud.remove_team_member_from_organization(db, organization_id, user_id)
         if not success:
             raise HTTPException(status_code=400, detail=error_msg)
 

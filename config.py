@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:1800,http://localhost:3000"
     """Comma-separated list of allowed CORS origins. Override in production."""
 
+    # Environment Configuration
+    ENVIRONMENT: str = "development"
+    """Environment: 'development', 'staging', or 'production'"""
+
     class Config:
         """Pydantic config"""
         env_file = ".env"
